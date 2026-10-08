@@ -475,7 +475,8 @@ win:
     msys64.exe
     del msys64.exe
 
-    bash -c "pacman-key --init; pacman-key --populate; pacman -Syu --noconfirm"
+    # A fresh MSYS2 system update can terminate its Bash process; the next pacman call continues it.
+    bash -c "pacman-key --init; pacman-key --populate; pacman -Syu --noconfirm" || ver >nul
     pacman -Syu --noconfirm ^
         make ^
         mingw-w64-x86_64-diffutils ^
