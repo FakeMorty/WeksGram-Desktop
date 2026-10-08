@@ -28,9 +28,13 @@
 #include "ui/widgets/buttons.h"
 #include "ui/wrap/vertical_layout.h"
 
+#include <algorithm>
 #include <memory>
-#include <QFileDialog>
+#include <QDateTime>
+#include <QDir>
+#include <QFileInfo>
 #include <QGuiApplication>
+#include <QStandardPaths>
 
 MessageShotBox::MessageShotBox(
 	QWidget *parent,
@@ -203,6 +207,27 @@ void MessageShotBox::setupContent() {
 		}
 	}
 
+	constexpr auto kMaxMessagesPerShot = std::size_t(8);
+	auto messageChunks = std::vector<std::vector<not_null<HistoryItem*>>>();
+	messageChunks.reserve(
+		(_config.messages.size() + kMaxMessagesPerShot - 1)
+		/ kMaxMessagesPerShot);
+	for (auto offset = std::size_t(0);
+		offset < _config.messages.size();
+		offset += kMaxMessagesPerShot) {
+		const auto count = std::min(
+			kMaxMessagesPerShot,
+			_config.messages.size() - offset);
+		messageChunks.emplace_back(
+			_config.messages.begin() + offset,
+			_config.messages.begin() + offset + count);
+	}
+
+	const auto shotImages = std::make_shared<std::vector<QImage>>(
+		messageChunks.size());
+	const auto sourceChatName = _config.messages.empty()
+		? u"Messages"_q
+		: _config.messages.front()->history()->peer->name();
 	const auto firstPreviewLatch = std::make_shared<TimedCountDownLatch>(1);
 	const auto generation = content->lifetime().make_state<int>(0);
 	const auto weak = base::make_weak(this);
@@ -210,17 +235,31 @@ void MessageShotBox::setupContent() {
 	const auto updatePreview = [=]
 	{
 		const auto currentGeneration = ++(*generation);
-		AyuFeatures::MessageShot::Make(this, _config, [=](const QImage &image, bool final)
-		{
-			if (!weak || currentGeneration != *generation) {
-				return;
-			}
+		for (auto &image : *shotImages) {
+			image = QImage();
+		}
 
-			if (final || imageView->getImage().isNull()) {
-				imageView->setImage(image);
-			}
-			firstPreviewLatch->countDown();
-		});
+		for (auto i = std::size_t(0); i != messageChunks.size(); ++i) {
+			auto chunkConfig = _config;
+			chunkConfig.messages = messageChunks[i];
+			AyuFeatures::MessageShot::Make(
+				this,
+				chunkConfig,
+				[=](const QImage &image, bool final)
+				{
+					if (!weak || currentGeneration != *generation) {
+						return;
+					}
+
+					(*shotImages)[i] = image;
+					if (i == 0) {
+						if (final || imageView->getImage().isNull()) {
+							imageView->setImage(image);
+						}
+						firstPreviewLatch->countDown();
+					}
+				});
+		}
 	};
 
 	if (savedThemeApplyResult == AyuFeatures::MessageShot::SavedThemeApplyResult::AwaitingAsync) {
@@ -399,19 +438,71 @@ void MessageShotBox::setupContent() {
 	addButton(tr::ayu_MessageShotSave(),
 			  [=]
 			  {
-				  const auto image = imageView->getImage();
-				  const auto path = QFileDialog::getSaveFileName(
-					  this,
-					  tr::lng_save_file(tr::now),
-					  QString(),
-					  "*.png");
-
-				  if (!path.isEmpty()) {
-					  image.save(path);
+				  auto downloads = QStandardPaths::writableLocation(
+					  QStandardPaths::DownloadLocation);
+				  if (downloads.isEmpty()) {
+					  downloads = QStandardPaths::writableLocation(
+						  QStandardPaths::DocumentsLocation);
+				  }
+				  if (downloads.isEmpty() || !QDir().mkpath(downloads)) {
+					  return;
 				  }
 
-			  	  _tookShot = true;
-				  closeBox();
+				  if (shotImages->empty()) {
+					  return;
+				  }
+				  auto chatName = sourceChatName;
+				  const auto invalidFileNameCharacters = u"<>:\"/\\|?*"_q;
+				  for (auto &ch : chatName) {
+					  if (ch.isControl() || invalidFileNameCharacters.contains(ch)) {
+						  ch = u'_';
+					  }
+				  }
+				  chatName = chatName.trimmed();
+				  chatName.truncate(80);
+				  while (chatName.endsWith(u'.') || chatName.endsWith(u' ')) {
+					  chatName.chop(1);
+				  }
+				  if (chatName.isEmpty()) {
+					  chatName = u"Messages"_q;
+				  }
+
+				  const auto timestamp = QDateTime::currentDateTime().toString(
+					  u"yyyy-MM-dd_HH-mm-ss-zzz"_q);
+				  const auto baseName = u"%1_%2"_q.arg(chatName, timestamp);
+				  auto uniqueBaseName = baseName;
+				  const auto directory = QDir(downloads);
+				  for (auto suffix = 2; ; ++suffix) {
+					  auto collision = false;
+					  for (auto i = std::size_t(0); i != shotImages->size(); ++i) {
+						  const auto number = QString::number(i + 1).rightJustified(2, u'0');
+						  const auto name = u"%1_%2.png"_q.arg(uniqueBaseName, number);
+						  if (QFileInfo::exists(directory.filePath(name))) {
+							  collision = true;
+							  break;
+						  }
+					  }
+					  if (!collision) {
+						  break;
+					  }
+					  uniqueBaseName = u"%1_%2"_q.arg(baseName).arg(suffix);
+				  }
+
+				  auto saved = false;
+				  for (auto i = std::size_t(0); i != shotImages->size(); ++i) {
+					  const auto &image = (*shotImages)[i];
+					  if (image.isNull()) {
+						  continue;
+					  }
+					  const auto number = QString::number(i + 1).rightJustified(2, u'0');
+					  const auto name = u"%1_%2.png"_q.arg(uniqueBaseName, number);
+					  saved = image.save(directory.filePath(name), "PNG") || saved;
+				  }
+
+				  if (saved) {
+					  _tookShot = true;
+					  closeBox();
+				  }
 			  });
 	addButton(tr::ayu_MessageShotCopy(),
 			  [=]
