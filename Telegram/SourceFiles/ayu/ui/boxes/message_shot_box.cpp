@@ -454,7 +454,7 @@ void MessageShotBox::setupContent() {
 				  auto chatName = sourceChatName;
 				  const auto invalidFileNameCharacters = u"<>:\"/\\|?*"_q;
 				  for (auto &ch : chatName) {
-					  if (ch.isControl() || invalidFileNameCharacters.contains(ch)) {
+					  if (ch.category() == QChar::Other_Control || invalidFileNameCharacters.contains(ch)) {
 						  ch = u'_';
 					  }
 				  }
